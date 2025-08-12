@@ -47,7 +47,7 @@ def _default_permissoes(role="user"):
         "editar_lancamentos": True,
         "editar_servicos": False,
         "editar_usuarios": False,
-            "corrigir_registros": False,
+        "corrigir_registros": False,
     }
     if role == "admin":
         for k in base:
@@ -55,13 +55,11 @@ def _default_permissoes(role="user"):
     return base
 
 def _merge_permissoes(user_dict):
-    # Aceita dict ou pandas.Series
     if hasattr(user_dict, "to_dict"):
         user_dict = user_dict.to_dict()
     role = user_dict.get("role", "user") if isinstance(user_dict, dict) else "user"
     p = dict(_default_permissoes(role))
     up_raw = (user_dict.get("permissoes") if isinstance(user_dict, dict) else None)
-    # Se vier NaN/None/str/float, zera para {}
     up = up_raw if isinstance(up_raw, dict) else {}
     p.update({k: bool(up.get(k, p[k])) for k in p})
     return p
@@ -75,6 +73,8 @@ def can_view(page_name):
         "Dashboard": "ver_dashboard",
         "Base de Dados": "ver_servicos",
         "Logs": "ver_logs",
+        "Correções": "corrigir_registros",
+        "Observações": True,
         "Admin": "ver_admin",
         "Minha Conta": True,
     }
@@ -86,8 +86,6 @@ def can_edit(action_key):
     p = _merge_permissoes(user)
     return bool(p.get(action_key, False))
 
-
-
 # -------------------- DB helpers --------------------
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -98,7 +96,6 @@ def init_db(conn):
     cur = conn.cursor()
     cur.execute("PRAGMA foreign_keys = ON;")
 
-
     # [AUTO-PATCH] Tabela 'etapas' e coluna obra_id em servicos
     cur.execute("""CREATE TABLE IF NOT EXISTS etapas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,14 +104,13 @@ def init_db(conn):
         UNIQUE (obra_id, nome),
         FOREIGN KEY (obra_id) REFERENCES obras(id)
     )""")
-    # adicionar obra_id em servicos se faltar
     cols = [r[1] for r in cur.execute("PRAGMA table_info(servicos)")]
     if "obra_id" not in cols:
         try:
             cur.execute("ALTER TABLE servicos ADD COLUMN obra_id INTEGER REFERENCES obras(id)")
-        except Exception as _e:
+        except Exception:
             pass
-        # Tabelas principais
+
     cur.execute("CREATE TABLE IF NOT EXISTS obras (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE NOT NULL)")
     cur.execute("""CREATE TABLE IF NOT EXISTS casas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +124,6 @@ def init_db(conn):
         UNIQUE(obra_id, lote),
         FOREIGN KEY (obra_id) REFERENCES obras(id) ON DELETE CASCADE
     )""")
-    # Tabela de ativações por etapa (frente de serviço)
     cur.execute("""CREATE TABLE IF NOT EXISTS casa_ativacoes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         casa_id INTEGER NOT NULL,
@@ -140,7 +135,7 @@ def init_db(conn):
         FOREIGN KEY (casa_id) REFERENCES casas(id) ON DELETE CASCADE
     )""")
 
-    cur.execute("CREATE TABLE IF NOT EXISTS servicos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, etapa TEXT NOT NULL, UNIQUE(nome, etapa))")
+    cur.execute("CREATE TABLE IF NOT EXISTS servicos (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, etapa TEXT NOT NULL, obra_id INTEGER, UNIQUE(nome, etapa, obra_id))")
     cur.execute("""CREATE TABLE IF NOT EXISTS previstos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         casa_id INTEGER NOT NULL,
@@ -176,52 +171,15 @@ def init_db(conn):
         observacoes TEXT,
         foto_path TEXT,
         created_at TEXT NOT NULL,
+        anulado INTEGER NOT NULL DEFAULT 0,
+        anulado_por TEXT,
+        anulado_em TEXT,
+        anulacao_motivo TEXT,
         FOREIGN KEY (obra_id) REFERENCES obras(id) ON DELETE CASCADE,
         FOREIGN KEY (casa_id) REFERENCES casas(id) ON DELETE CASCADE,
         FOREIGN KEY (servico_id) REFERENCES servicos(id) ON DELETE CASCADE
     )""")
 
-    pass
-
-
-    # Migrations idempotentes
-    try:
-        cur.execute("ALTER TABLE casas ADD COLUMN ativa INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE casas ADD COLUMN ativa_em TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE casas ADD COLUMN ativa_por TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE lancamentos ADD COLUMN executor TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-    # Migrations: campos de anulação em lancamentos
-    try:
-        cur.execute("ALTER TABLE lancamentos ADD COLUMN anulado INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE lancamentos ADD COLUMN anulado_por TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE lancamentos ADD COLUMN anulado_em TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE lancamentos ADD COLUMN anulacao_motivo TEXT")
-    except sqlite3.OperationalError:
-        pass
-
-
-    # Auditoria fora de try/except de migrations
     cur.execute("""CREATE TABLE IF NOT EXISTS auditoria (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT NOT NULL,
@@ -235,9 +193,7 @@ def init_db(conn):
 
     conn.commit()
 
-
 def one(conn, sql, args=()):
-
     cur = conn.execute(sql, args)
     row = cur.fetchone()
     return row[0] if row else None
@@ -260,7 +216,6 @@ def get_estado_df(conn):
     """
     return pd.read_sql_query(sql, conn)
 
-
 def log_event(conn, usuario, acao, obra_id=None, casa_id=None, servico_id=None, detalhes=None):
     ts = datetime.now().isoformat()
     det = json.dumps(detalhes, ensure_ascii=False) if detalhes is not None else None
@@ -268,6 +223,52 @@ def log_event(conn, usuario, acao, obra_id=None, casa_id=None, servico_id=None, 
         "INSERT INTO auditoria (timestamp, usuario, acao, obra_id, casa_id, servico_id, detalhes) VALUES (?,?,?,?,?,?,?)",
         (ts, usuario, acao, obra_id, casa_id, servico_id, det)
     )
+    conn.commit()
+
+# -------------------- Deleções seguras --------------------
+def delete_servico(conn, servico_id):
+    cur = conn.cursor()
+    cur.execute("SELECT nome, etapa, COALESCE(obra_id,'') FROM servicos WHERE id=?", (servico_id,))
+    row = cur.fetchone()
+    if not row: 
+        return
+    nome, etapa, obra_id = row
+    # Apagar dependências
+    cur.execute("DELETE FROM previstos WHERE servico_id=?", (servico_id,))
+    cur.execute("DELETE FROM estado_servicos WHERE servico_id=?", (servico_id,))
+    cur.execute("DELETE FROM lancamentos WHERE servico_id=?", (servico_id,))
+    cur.execute("DELETE FROM servicos WHERE id=?", (servico_id,))
+    conn.commit()
+
+def delete_etapa(conn, obra_id, etapa_nome):
+    cur = conn.cursor()
+    # apagar ativações dessa etapa
+    cur.execute("""
+        DELETE FROM casa_ativacoes
+        WHERE etapa=? AND casa_id IN (SELECT id FROM casas WHERE obra_id=?)
+    """, (etapa_nome, obra_id))
+    # apagar serviços da etapa (e dependências)
+    servs = cur.execute("SELECT id FROM servicos WHERE (obra_id=? OR obra_id IS NULL) AND etapa=?", (obra_id, etapa_nome)).fetchall()
+    for (sid,) in servs:
+        delete_servico(conn, sid)
+    # apagar a própria etapa (cadastro)
+    cur.execute("DELETE FROM etapas WHERE obra_id=? AND nome=?", (obra_id, etapa_nome))
+    conn.commit()
+
+def delete_obra(conn, obra_id):
+    cur = conn.cursor()
+    # apagar lançamentos da obra
+    cur.execute("DELETE FROM lancamentos WHERE obra_id=?", (obra_id,))
+    # apagar estado/previstos/ativações/casas
+    cur.execute("DELETE FROM previstos WHERE casa_id IN (SELECT id FROM casas WHERE obra_id=?)", (obra_id,))
+    cur.execute("DELETE FROM estado_servicos WHERE casa_id IN (SELECT id FROM casas WHERE obra_id=?)", (obra_id,))
+    cur.execute("DELETE FROM casa_ativacoes WHERE casa_id IN (SELECT id FROM casas WHERE obra_id=?)", (obra_id,))
+    cur.execute("DELETE FROM casas WHERE obra_id=?", (obra_id,))
+    # apagar etapas e serviços vinculados à obra
+    cur.execute("DELETE FROM etapas WHERE obra_id=?", (obra_id,))
+    cur.execute("DELETE FROM servicos WHERE obra_id=?", (obra_id,))
+    # por fim, a obra
+    cur.execute("DELETE FROM obras WHERE id=?", (obra_id,))
     conn.commit()
 
 # -------------------- UI --------------------
@@ -305,13 +306,11 @@ if st.sidebar.button("Sair"):
     st.session_state.pop("user", None)
     st.rerun()
 
-pages_all = ["Ativar Casa", "Lançamentos", "Dashboard", "Base de Dados", "Logs", "Correções", "Admin", "Minha Conta"]
+pages_all = ["Ativar Casa", "Lançamentos", "Dashboard", "Observações", "Base de Dados", "Logs", "Correções", "Admin", "Minha Conta"]
 pages = [p for p in pages_all if can_view(p)]
 page = st.sidebar.radio("Navegação", pages)
 
 # -------- Minha Conta --------
-
-
 if page == "Minha Conta":
     st.header("Minha Conta")
     st.write(f"Usuário: **{user.get('username','')}**")
@@ -350,12 +349,10 @@ if page == "Minha Conta":
                 if not found:
                     st.error("Usuário não encontrado ou inativo.")
 
-# -------- Serviços (Admin) --------
-
-
+# -------- Base de Dados (CRUD) --------
 if page == "Base de Dados" and can_view("Base de Dados"):
     st.header("Base de Dados")
-    tabs = st.tabs(["Obras", "Etapas", "Base de Dados"])
+    tabs = st.tabs(["Obras", "Etapas", "Serviços por Etapa"])
 
     # --- Obras ---
     with tabs[0]:
@@ -368,10 +365,32 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                     conn.execute("INSERT INTO obras (nome) VALUES (?)", (nome_obra.strip(),))
                     conn.commit()
                     st.success(f"Obra '{nome_obra}' criada.")
+                    log_event(conn, user["nome"], "criar_obra", detalhes={"obra": nome_obra.strip()})
                 except Exception as e:
                     st.error(f"Não foi possível criar a obra: {e}")
         obras_df = pd.read_sql_query("SELECT id, nome FROM obras ORDER BY nome", conn)
         st.dataframe(obras_df, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Excluir obra")
+        if not obras_df.empty:
+            ob_del_nome = st.selectbox("Selecione a obra para excluir", obras_df["nome"].tolist(), key="obra_del_nome")
+            ob_id = int(obras_df.loc[obras_df["nome"]==ob_del_nome, "id"].iloc[0])
+            col_a, col_b = st.columns([1,2])
+            chk_cascade = col_a.checkbox("Apagar tudo que pertence a esta obra (casas, lançamentos, serviços, etapas...)", value=True, help="Se desmarcar, a exclusão pode falhar por vínculos.")
+            conf_txt = col_b.text_input('Digite "EXCLUIR" para confirmar', key="obra_del_conf")
+            btn_del = st.button("🗑️ Excluir obra selecionada", type="primary", disabled=(conf_txt.strip().upper()!="EXCLUIR"))
+            if btn_del:
+                try:
+                    if chk_cascade:
+                        delete_obra(conn, ob_id)
+                    else:
+                        conn.execute("DELETE FROM obras WHERE id=?", (ob_id,))
+                        conn.commit()
+                    st.success(f"Obra '{ob_del_nome}' excluída.")
+                    log_event(conn, user["nome"], "excluir_obra", obra_id=ob_id, detalhes={"obra": ob_del_nome, "cascade": chk_cascade})
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Falha ao excluir obra: {e}")
 
     # --- Etapas ---
     with tabs[1]:
@@ -382,6 +401,7 @@ if page == "Base de Dados" and can_view("Base de Dados"):
         else:
             obra_sel = st.selectbox("Obra", obras_df["nome"].tolist(), key="bd_et_ob")
             obra_id = int(obras_df.loc[obras_df["nome"] == obra_sel, "id"].iloc[0])
+
             with st.form("nova_etapa"):
                 etapa_nome = st.text_input("Nova Etapa", placeholder="Ex.: Reboco")
                 ok_e = st.form_submit_button("Adicionar Etapa")
@@ -390,10 +410,32 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                         conn.execute("INSERT INTO etapas (obra_id, nome) VALUES (?, ?)", (obra_id, etapa_nome.strip()))
                         conn.commit()
                         st.success(f"Etapa '{etapa_nome}' criada para {obra_sel}.")
+                        log_event(conn, user["nome"], "criar_etapa", obra_id=obra_id, detalhes={"etapa": etapa_nome.strip()})
                     except Exception as e:
                         st.error(f"Não foi possível criar a etapa: {e}")
+
             etapas_df = pd.read_sql_query("SELECT id, nome FROM etapas WHERE obra_id=? ORDER BY nome", conn, params=(obra_id,))
             st.dataframe(etapas_df, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Excluir etapa")
+            if not etapas_df.empty:
+                et_del_nome = st.selectbox("Etapa para excluir", etapas_df["nome"].tolist(), key="et_del_nome")
+                col_a, col_b = st.columns([1,2])
+                chk_cascade = col_a.checkbox("Remover serviços e dados desta etapa também", value=True, help="Remove serviços, lançamentos, estado, previstos e ativações desta etapa.")
+                conf_txt = col_b.text_input('Digite "EXCLUIR" para confirmar', key="et_del_conf")
+                btn_del = st.button("🗑️ Excluir etapa", type="primary", disabled=(conf_txt.strip().upper()!="EXCLUIR"))
+                if btn_del:
+                    try:
+                        if chk_cascade:
+                            delete_etapa(conn, obra_id, et_del_nome)
+                        else:
+                            conn.execute("DELETE FROM etapas WHERE obra_id=? AND nome=?", (obra_id, et_del_nome))
+                            conn.commit()
+                        st.success(f"Etapa '{et_del_nome}' excluída.")
+                        log_event(conn, user["nome"], "excluir_etapa", obra_id=obra_id, detalhes={"etapa": et_del_nome, "cascade": chk_cascade})
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Falha ao excluir etapa: {e}")
 
     # --- Serviços ---
     with tabs[2]:
@@ -405,7 +447,6 @@ if page == "Base de Dados" and can_view("Base de Dados"):
             obra_sel = st.selectbox("Obra", obras_df["nome"].tolist(), key="bd_sv_ob")
             obra_id = int(obras_df.loc[obras_df["nome"] == obra_sel, "id"].iloc[0])
             etapas_df = pd.read_sql_query("SELECT id, nome FROM etapas WHERE obra_id=? ORDER BY nome", conn, params=(obra_id,))
-            # fallback: usar etapas distintas de servicos quando ainda não existir cadastro explícito
             if etapas_df.empty:
                 etapas_df = pd.read_sql_query("SELECT NULL as id, etapa as nome FROM servicos WHERE obra_id=? GROUP BY etapa ORDER BY etapa", conn, params=(obra_id,))
             if etapas_df.empty:
@@ -420,17 +461,35 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                             conn.execute("INSERT INTO servicos (nome, etapa, obra_id) VALUES (?, ?, ?)", (nome_serv.strip(), etapa_sel, obra_id))
                             conn.commit()
                             st.success(f"Serviço '{nome_serv}' adicionado em {etapa_sel} ({obra_sel}).")
+                            log_event(conn, user["nome"], "criar_servico", obra_id=obra_id, detalhes={"etapa": etapa_sel, "servico": nome_serv.strip()})
                         except Exception as e:
                             st.error(f"Não foi possível adicionar o serviço: {e}")
+
                 servs_df = pd.read_sql_query("SELECT id, nome FROM servicos WHERE (obra_id=? OR obra_id IS NULL) AND etapa=? ORDER BY nome", conn, params=(obra_id, etapa_sel))
                 st.dataframe(servs_df, use_container_width=True, hide_index=True)
+
+                st.markdown("#### Excluir serviço")
+                if not servs_df.empty:
+                    srv_del_nome = st.selectbox("Serviço para excluir", servs_df["nome"].tolist(), key="srv_del_nome")
+                    srv_id = int(servs_df.loc[servs_df["nome"]==srv_del_nome, "id"].iloc[0])
+                    col_a, col_b = st.columns([1,2])
+                    st.caption("A exclusão remove previstos, estado e lançamentos associados a este serviço.")
+                    conf_txt = col_b.text_input('Digite "EXCLUIR" para confirmar', key="srv_del_conf")
+                    btn_del = st.button("🗑️ Excluir serviço", type="primary", disabled=(conf_txt.strip().upper()!="EXCLUIR"))
+                    if btn_del:
+                        try:
+                            delete_servico(conn, srv_id)
+                            st.success(f"Serviço '{srv_del_nome}' excluído.")
+                            log_event(conn, user["nome"], "excluir_servico", obra_id=obra_id, servico_id=srv_id, detalhes={"etapa": etapa_sel, "servico": srv_del_nome})
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Falha ao excluir serviço: {e}")
 
 # -------- Logs --------
 if page == "Logs" and can_view("Logs"):
     st.header("Logs do Sistema")
     st.caption("Registro de tudo que foi feito: quem, quando e o que.")
 
-    # Filtros simples
     col1, col2, col3 = st.columns(3)
     usuarios = pd.read_sql_query("SELECT DISTINCT COALESCE(usuario,'') as usuario FROM auditoria ORDER BY usuario", conn)
     usuario_sel = col1.selectbox("Usuário", ["Todos"] + [u for u in usuarios["usuario"].tolist() if u])
@@ -459,15 +518,11 @@ if page == "Logs" and can_view("Logs"):
     df_logs = pd.read_sql_query(base_sql, conn, params=params)
     st.dataframe(df_logs, use_container_width=True)
 
-    # Exportar
-    from io import BytesIO
     if st.button("Exportar CSV"):
         csv_bytes = df_logs.to_csv(index=False).encode("utf-8-sig")
         st.download_button("Baixar CSV", data=csv_bytes, file_name="logs.csv", mime="text/csv")
 
 # -------- Admin --------
-
-
 if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
     st.header("Administração de Usuários")
     data = load_users()
@@ -477,11 +532,10 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
         st.info("Nenhum usuário no arquivo usuarios.json")
     else:
         df_users = pd.DataFrame(data["users"])
-        # Mostrar permissões resumidas (só para visualização)
         def _perm_resumo(u):
             p = _merge_permissoes(u.to_dict() if hasattr(u, "to_dict") else u)
             chaves = ["ver_ativar_casa","ver_lancamentos","ver_dashboard","ver_servicos","ver_logs","ver_admin",
-                      "editar_lancamentos","editar_servicos","editar_usuarios"]
+                      "editar_lancamentos","editar_servicos","editar_usuarios","corrigir_registros"]
             return ", ".join([k for k in chaves if p.get(k)])
         df_users["permissoes_resumo"] = df_users.apply(_perm_resumo, axis=1)
         cols_show = [c for c in ["username","nome","role","ativo","permissoes_resumo"] if c in df_users.columns]
@@ -494,7 +548,6 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
         nu_nome = st.text_input("Nome completo")
         nu_role = st.selectbox("Perfil", ["user", "admin"])
         nu_pw = st.text_input("Senha inicial", type="password", value="123456")
-        # Permissões iniciais
         base_p = _default_permissoes(nu_role)
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -502,16 +555,14 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
             v_la = st.checkbox("Ver Lançamentos", value=base_p["ver_lancamentos"])
             v_da = st.checkbox("Ver Dashboard", value=base_p["ver_dashboard"])
         with c2:
-            v_se = st.checkbox("Ver Serviços", value=base_p["ver_servicos"])
+            v_se = st.checkbox("Ver Serviços (Base de Dados)", value=base_p["ver_servicos"])
             v_lo = st.checkbox("Ver Logs", value=base_p["ver_logs"])
             v_ad = st.checkbox("Ver Admin", value=base_p["ver_admin"])
-            with c3:
-                e_la = st.checkbox("Editar Lançamentos", value=base_p["editar_lancamentos"])
-                e_se = st.checkbox("Editar Serviços", value=base_p["editar_servicos"])
-                e_us = st.checkbox("Editar Usuários", value=base_p["editar_usuarios"])
-                c_rr = st.checkbox("Corrigir Registros (Correções)", value=base_p.get("corrigir_registros", False))
-
-
+        with c3:
+            e_la = st.checkbox("Editar Lançamentos", value=base_p["editar_lancamentos"])
+            e_se = st.checkbox("Editar Serviços (Base de Dados)", value=base_p["editar_servicos"])
+            e_us = st.checkbox("Editar Usuários", value=base_p["editar_usuarios"])
+            c_rr = st.checkbox("Corrigir Registros (Correções)", value=base_p.get("corrigir_registros", False))
 
         ok_new = st.form_submit_button("Criar")
         if ok_new:
@@ -531,7 +582,7 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
                 data["users"] = users
                 save_users(data)
                 st.success("Usuário criado. Atualize a página para ver na lista.")
-                log_event(conn, st.session_state["user"]["nome"], "criar_usuario", detalhes={"username": nu_user, "nome": nu_nome, "role": nu_role, "permissoes": perms})
+                log_event(conn, user["nome"], "criar_usuario", detalhes={"username": nu_user, "nome": nu_nome, "role": nu_role, "permissoes": perms})
 
     st.divider()
     st.subheader("Editar usuário existente")
@@ -546,7 +597,6 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
             eu_role = st.selectbox("Perfil", ["user","admin"], index=0 if u.get("role")=="user" else 1)
             eu_status = st.selectbox("Status", ["Ativo","Inativo"], index=0 if u.get("ativo", True) else 1)
             eu_pw_reset = st.checkbox("Resetar senha para 123456")
-            # Permissões
             base_p = _merge_permissoes(u | {"role": eu_role}) if hasattr(dict, "__or__") else _merge_permissoes({"role": eu_role, "permissoes": u.get("permissoes")})
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -554,18 +604,16 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
                 v_la = st.checkbox("Ver Lançamentos", value=base_p["ver_lancamentos"])
                 v_da = st.checkbox("Ver Dashboard", value=base_p["ver_dashboard"])
             with c2:
-                v_se = st.checkbox("Ver Serviços", value=base_p["ver_servicos"])
+                v_se = st.checkbox("Ver Serviços (Base de Dados)", value=base_p["ver_servicos"])
                 v_lo = st.checkbox("Ver Logs", value=base_p["ver_logs"])
                 v_ad = st.checkbox("Ver Admin", value=base_p["ver_admin"])
             with c3:
                 e_la = st.checkbox("Editar Lançamentos", value=base_p["editar_lancamentos"])
-                e_se = st.checkbox("Editar Serviços", value=base_p["editar_servicos"])
+                e_se = st.checkbox("Editar Serviços (Base de Dados)", value=base_p["editar_servicos"])
                 e_us = st.checkbox("Editar Usuários", value=base_p["editar_usuarios"])
                 c_rr = st.checkbox("Corrigir Registros (Correções)", value=base_p.get("corrigir_registros", False))
 
-
             ok_m = st.form_submit_button("Salvar alterações")
-
             if ok_m:
                 u["nome"] = eu_nome
                 u["role"] = eu_role
@@ -580,7 +628,7 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
                 data["users"][idx] = u
                 save_users(data)
                 st.success("Alterações salvas.")
-                log_event(conn, st.session_state["user"]["nome"], "alterar_usuario", detalhes={"username": u["username"], "role": eu_role, "ativo": u["ativo"], "permissoes": u["permissoes"]})
+                log_event(conn, user["nome"], "alterar_usuario", detalhes={"username": u["username"], "role": eu_role, "ativo": u["ativo"], "permissoes": u["permissoes"]})
 
     st.divider()
     st.subheader("Resetar Lançamentos por Casa")
@@ -613,31 +661,27 @@ if page == "Admin" and can_view("Admin") and can_edit("editar_usuarios"):
                 confirmar = colr1.checkbox("Estou ciente e desejo resetar esta casa", key="rst_chk")
                 txtconf = colr2.text_input('Digite "RESETAR" para confirmar', value="", key="rst_txt")
                 btn = st.button("🧹 Resetar lançamentos da casa", type="primary", disabled=not (confirmar and txtconf.strip().upper() == "RESETAR"), key="rst_btn")
-                
                 if btn:
                     try:
                         now = datetime.now().isoformat()
-                        # Apaga lançamentos da casa
                         conn.execute("DELETE FROM lancamentos WHERE casa_id=?", (casa_id_rst,))
-                        # Zera estado dos serviços da casa
                         conn.execute(
                             "UPDATE estado_servicos SET status='Não iniciado', executor=NULL, data_inicio=NULL, data_fim=NULL, updated_at=? WHERE casa_id=?",
                             (now, casa_id_rst)
                         )
-                        # Desativa a casa (exige reativação antes de novos lançamentos)
                         conn.execute("UPDATE casas SET ativa=0, ativa_em=NULL, ativa_por=NULL WHERE id=?", (casa_id_rst,))
                         conn.commit()
                         st.success(f"Lançamentos da casa {lote_sel_rst} resetados e a casa foi desativada.")
-                        log_event(conn, st.session_state["user"]["nome"], "resetar_lancamentos_casa", obra_id=obra_id_rst, casa_id=casa_id_rst, detalhes={"lote": lote_sel_rst, "desativou_casa": True})
+                        log_event(conn, user["nome"], "resetar_lancamentos_casa", obra_id=obra_id_rst, casa_id=casa_id_rst, detalhes={"lote": lote_sel_rst, "desativou_casa": True})
                         st.rerun()
                     except Exception as e:
                         st.error(f"Falha ao resetar: {e}")
+
 # -------- Correções --------
-if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"):
+if page == "Correções" and can_view("Correções") and can_edit("corrigir_registros"):
     st.header("Correções (Desfazer/Editar Registros)")
     st.caption("Somente casas com lançamentos ativos (não anulados) aparecem aqui. Todas as alterações são auditadas.")
 
-    # 1) Selecionar obra
     obras = pd.read_sql_query("SELECT * FROM obras ORDER BY nome", conn)
     if obras.empty:
         st.info("Não há obras cadastradas.")
@@ -645,7 +689,6 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
         obra_nome = st.selectbox("Obra", obras["nome"].tolist(), key="cor_ob")
         obra_id = int(pd.read_sql_query("SELECT id FROM obras WHERE nome=?", conn, params=(obra_nome,)).iloc[0,0])
 
-        # 2) Listar casas desta obra que possuem lançamentos não anulados
         casas_lanc = pd.read_sql_query(
             """
             SELECT DISTINCT c.id as casa_id, c.lote, c.ativa, c.ativa_em, c.ativa_por
@@ -658,15 +701,12 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
         if casas_lanc.empty:
             st.info("Não há casas com lançamentos nesta obra.")
         else:
-            # Pequeno resumo tipo dashboard
             st.subheader("Casas com lançamentos")
             st.dataframe(casas_lanc[["lote","ativa","ativa_em","ativa_por"]], use_container_width=True, hide_index=True)
 
-            # 3) Selecionar casa (lote)
             lote_sel = st.selectbox("Selecionar casa (lote) para corrigir", casas_lanc["lote"].tolist(), key="cor_lote")
             casa_id = int(casas_lanc.loc[casas_lanc["lote"] == lote_sel, "casa_id"].iloc[0])
 
-            # 4) Serviços dessa casa com lançamentos (não anulados)
             servs_casa = pd.read_sql_query(
                 """
                 SELECT DISTINCT s.id as servico_id, s.nome as servico, s.etapa
@@ -682,16 +722,11 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
                 col_f1, col_f2 = st.columns(2)
                 etapa_opts = ["Todas"] + sorted(servs_casa["etapa"].unique().tolist())
                 etapa_sel = col_f1.selectbox("Etapa", etapa_opts, key="cor_etp")
-                if etapa_sel != "Todas":
-                    servs_f = servs_casa[servs_casa["etapa"] == etapa_sel]
-                else:
-                    servs_f = servs_casa
+                servs_f = servs_casa if etapa_sel == "Todas" else servs_casa[servs_casa["etapa"] == etapa_sel]
                 serv_nome = col_f2.selectbox("Serviço", servs_f["servico"].tolist(), key="cor_srv")
                 servico_id = int(servs_f.loc[servs_f["servico"] == serv_nome, "servico_id"].iloc[0])
 
                 st.divider()
-
-                # 5) Quadro do estado atual + últimos lançamentos
                 st.subheader(f"Estado atual — Casa {lote_sel} • {serv_nome} ({etapa_sel if etapa_sel!='Todas' else servs_casa.loc[servs_casa['servico']==serv_nome, 'etapa'].iloc[0]})")
 
                 es = pd.read_sql_query(
@@ -707,7 +742,6 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
                     cur_ini = es["data_inicio"].iloc[0]
                     cur_fim = es["data_fim"].iloc[0]
 
-                # Últimos 5 lançamentos do serviço
                 ult = pd.read_sql_query(
                     """
                     SELECT id, status, responsavel, executor, data_inicio, data_conclusao, observacoes, created_at
@@ -721,8 +755,6 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
                 st.dataframe(ult, use_container_width=True)
 
                 st.divider()
-
-                # 6) Ações de correção em duas colunas
                 ca, cb = st.columns(2)
 
                 with ca:
@@ -742,10 +774,10 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
                                 lid = int(row.iloc[0,0])
                                 now = datetime.now().isoformat()
                                 conn.execute("UPDATE lancamentos SET anulado=1, anulado_por=?, anulado_em=?, anulacao_motivo=? WHERE id=?",
-                                             (st.session_state["user"]["nome"], now, motivo_anul, lid))
+                                             (user["nome"], now, motivo_anul, lid))
                                 conn.commit()
                                 st.success("Lançamento anulado.")
-                                log_event(conn, st.session_state["user"]["nome"], "anular_lancamento", obra_id=obra_id, casa_id=casa_id, servico_id=servico_id, detalhes={"motivo": motivo_anul, "lancamento_id": lid})
+                                log_event(conn, user["nome"], "anular_lancamento", obra_id=obra_id, casa_id=casa_id, servico_id=servico_id, detalhes={"motivo": motivo_anul, "lancamento_id": lid})
                                 st.rerun()
 
                 with cb:
@@ -775,11 +807,10 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
                                          """, (casa_id, servico_id, novo_status, novo_executor or "", di, df, now))
                             conn.commit()
                             st.success("Estado do serviço atualizado.")
-                            log_event(conn, st.session_state["user"]["nome"], "editar_estado_servico", obra_id=obra_id, casa_id=casa_id, servico_id=servico_id, detalhes={"motivo": motivo_estado, "novo_status": novo_status, "novo_executor": novo_executor, "data_inicio": di, "data_fim": df})
+                            log_event(conn, user["nome"], "editar_estado_servico", obra_id=obra_id, casa_id=casa_id, servico_id=servico_id, detalhes={"motivo": motivo_estado, "novo_status": novo_status, "novo_executor": novo_executor, "data_inicio": di, "data_fim": df})
                             st.rerun()
 
                 st.divider()
-                # 7) Ação adicional: Desativar casa (se ativa)
                 st.markdown("### Ativação da casa")
                 ativa_info = pd.read_sql_query("SELECT ativa, ativa_em, ativa_por FROM casas WHERE id=?", conn, params=(casa_id,))
                 if not ativa_info.empty and int(ativa_info.iloc[0]["ativa"]) == 1:
@@ -791,14 +822,12 @@ if page == "Correções" and can_view("Admin") and can_edit("corrigir_registros"
                             conn.execute("UPDATE casas SET ativa=0, ativa_em=NULL, ativa_por=NULL WHERE id=?", (casa_id,))
                             conn.commit()
                             st.success(f"Casa {lote_sel} desativada.")
-                            log_event(conn, st.session_state["user"]["nome"], "desativar_casa", obra_id=obra_id, casa_id=casa_id, detalhes={"motivo": motivo_desat, "lote": lote_sel})
+                            log_event(conn, user["nome"], "desativar_casa", obra_id=obra_id, casa_id=casa_id, detalhes={"motivo": motivo_desat, "lote": lote_sel})
                             st.rerun()
                 else:
                     st.info("Casa está desativada.")
 
-
 # -------- Ativar Casa --------
-
 if page == "Ativar Casa":
     st.header("Ativar Casa (por frente de serviço)")
     obras = pd.read_sql_query("SELECT * FROM obras ORDER BY nome", conn)
@@ -809,7 +838,6 @@ if page == "Ativar Casa":
         obra_id = int(pd.read_sql_query("SELECT id FROM obras WHERE nome=?", conn, params=(obra_nome,)).iloc[0,0])
         casas_df = pd.read_sql_query("SELECT id, lote FROM casas WHERE obra_id=? ORDER BY lote", conn, params=(obra_id,))
         lote = st.selectbox("Lote (Identificador)", casas_df["lote"].tolist())
-        # [AUTO-PATCH] Seleção robusta por índice para evitar filtros vazios
         _opts = casas_df.reset_index(drop=False).rename(columns={"index":"_row_index"})
         try:
             _sel_idx = int(_opts.loc[_opts["lote"] == lote, "_row_index"].iloc[0])
@@ -820,7 +848,6 @@ if page == "Ativar Casa":
         casa_id = int(casa_row["id"])
         etapa = st.selectbox("Frente de serviço (etapa)", ["Reboco","Pintura","Revestimento"], index=0)
 
-        # Estado atual da ativação dessa etapa
         ativ = pd.read_sql_query("SELECT ativa, ativa_em, ativa_por FROM casa_ativacoes WHERE casa_id=? AND etapa=?", conn, params=(casa_id, etapa))
         ativa_flag = int(ativ["ativa"].iloc[0]) if not ativ.empty else 0
         ativa_em = ativ["ativa_em"].iloc[0] if not ativ.empty else None
@@ -829,28 +856,13 @@ if page == "Ativar Casa":
         if ativa_flag:
             st.success(f"Casa {lote} — {etapa} já está ATIVA desde {ativa_em} por {ativa_por or '—'}.")
             if st.button("Desativar esta frente (etapa)"):
-                now = datetime.now().isoformat()
                 conn.execute(
                     "INSERT INTO casa_ativacoes (casa_id, etapa, ativa, ativa_em, ativa_por) VALUES (?,?,?,?,?) "
                     "ON CONFLICT(casa_id, etapa) DO UPDATE SET ativa=0, ativa_em=NULL, ativa_por=NULL",
                     (casa_id, etapa, 0, None, None)
                 )
                 conn.commit()
-            # Seed estado_servicos a partir dos serviços da etapa/obra
-            try:
-                now2 = datetime.now().isoformat()
-                obid = int(pd.read_sql_query("SELECT obra_id FROM casas WHERE id=?", conn, params=(casa_id,)).iloc[0,0])
-                conn.execute("""
-                    INSERT OR IGNORE INTO estado_servicos
-                        (casa_id, servico_id, status, executor, data_inicio, data_fim, updated_at)
-                    SELECT ?, s.id, 'Não iniciado', '', NULL, NULL, ?
-                    FROM servicos s WHERE (s.obra_id = ? OR s.obra_id IS NULL) AND s.etapa = ?
-                """, (casa_id, now2, obid, etapa))
-                conn.commit()
-            except Exception as _e:
-                pass
-        
-                log_event(conn, st.session_state["user"]["nome"], "desativar_frente", obra_id=obra_id, casa_id=casa_id, detalhes={"lote": lote, "etapa": etapa})
+                log_event(conn, user["nome"], "desativar_frente", obra_id=obra_id, casa_id=casa_id, detalhes={"lote": lote, "etapa": etapa})
                 st.rerun()
         else:
             st.info(f"Casa {lote} — {etapa} está INATIVA.")
@@ -859,30 +871,27 @@ if page == "Ativar Casa":
                 conn.execute(
                     "INSERT INTO casa_ativacoes (casa_id, etapa, ativa, ativa_em, ativa_por) VALUES (?,?,?,?,?) "
                     "ON CONFLICT(casa_id, etapa) DO UPDATE SET ativa=1, ativa_em=?, ativa_por=?",
-                    (casa_id, etapa, 1, now, st.session_state["user"]["nome"], now, st.session_state["user"]["nome"])
+                    (casa_id, etapa, 1, now, user["nome"], now, user["nome"])
                 )
                 conn.commit()
-                # Semear estado_servicos para todos os serviços da ETAPA (sem previstos)
                 try:
                     now2 = datetime.now().isoformat()
+                    obid = int(pd.read_sql_query("SELECT obra_id FROM casas WHERE id=?", conn, params=(casa_id,)).iloc[0,0])
                     conn.execute("""
                         INSERT OR IGNORE INTO estado_servicos
                             (casa_id, servico_id, status, executor, data_inicio, data_fim, updated_at)
                         SELECT ?, s.id, 'Não iniciado', '', NULL, NULL, ?
-                        FROM servicos s
-                        WHERE s.etapa = ?
-                    """, (casa_id, now2, etapa))
+                        FROM servicos s WHERE (s.obra_id = ? OR s.obra_id IS NULL) AND s.etapa = ?
+                    """, (casa_id, now2, obid, etapa))
                     conn.commit()
-                except Exception as _e:
+                except Exception:
                     pass
-            
-                log_event(conn, st.session_state["user"]["nome"], "ativar_frente", obra_id=obra_id, casa_id=casa_id, detalhes={"lote": lote, "etapa": etapa})
+                log_event(conn, user["nome"], "ativar_frente", obra_id=obra_id, casa_id=casa_id, detalhes={"lote": lote, "etapa": etapa})
                 st.success(f"Casa {lote} — {etapa} ativada com sucesso!")
                 st.rerun()
 
         st.divider()
         st.subheader("Status de serviços (somente leitura)")
-        # Lista serviços da etapa para visualização
         serv_df = pd.read_sql_query("SELECT id, nome FROM servicos WHERE etapa=? ORDER BY nome", conn, params=(etapa,))
         if serv_df.empty:
             st.info("Ainda não há serviços cadastrados para esta etapa.")
@@ -898,24 +907,20 @@ if page == "Ativar Casa":
             st.dataframe(estado, use_container_width=True)
 
 # -------- Lançamentos --------
-
 if page == "Lançamentos" and can_view("Lançamentos"):
     st.header("Iniciar/Finalizar Serviços")
     obras = pd.read_sql_query("SELECT * FROM obras ORDER BY nome", conn)
     if obras.empty:
         st.warning("Não há obras cadastradas.")
-    
     else:
         obra_nome = st.selectbox("Obra", obras["nome"].tolist())
         obra_id = int(pd.read_sql_query("SELECT id FROM obras WHERE nome=?", conn, params=(obra_nome,)).iloc[0,0])
 
-        # Seleciona a ETAPA primeiro
         etapas_df = pd.read_sql_query("SELECT nome FROM etapas WHERE obra_id=? ORDER BY nome", conn, params=(obra_id,))
         if etapas_df.empty:
             etapas_df = pd.read_sql_query("SELECT DISTINCT etapa as nome FROM servicos WHERE (obra_id=? OR obra_id IS NULL) ORDER BY etapa", conn, params=(obra_id,))
         etapa = st.selectbox("Etapa", etapas_df["nome"].tolist(), index=0)
 
-        # Casas ativas para a etapa (ou legado ativa=1)
         casas_df = pd.read_sql_query("""
             SELECT c.id, c.lote,
                    COALESCE(MAX(ca.ativa),0) AS ativa_etapa,
@@ -934,17 +939,15 @@ if page == "Lançamentos" and can_view("Lançamentos"):
         casa_row = casas_df[casas_df["lote"] == lote].iloc[0]
         casa_id = int(casa_row["id"])
 
-        # Validação (mantida)
         ativ = pd.read_sql_query("SELECT ativa FROM casa_ativacoes WHERE casa_id=? AND etapa=?", conn, params=(casa_id, etapa))
         casa_legacy = int(casa_row.get("ativa_legacy", 0))
-
         if (ativ.empty or int(ativ.iloc[0,0]) == 0) and casa_legacy != 1:
             st.error(f"Esta casa não está ATIVA para a frente '{etapa}'. Vá na página 'Ativar Casa' e ative essa frente antes de lançar serviços.")
             st.stop()
-# === MODO 1: INÍCIO MÚLTIPLO ===
+
+        # === INICIAR MÚLTIPLOS ===
         st.subheader("Iniciar Serviços")
         servs_df_all = pd.read_sql_query("SELECT id, nome FROM servicos WHERE etapa=? ORDER BY nome", conn, params=(etapa,))
-
         sugest_df = pd.read_sql_query("""
             SELECT s.id, s.nome, COALESCE(es.status, 'Não iniciado') AS status
             FROM servicos s
@@ -952,7 +955,6 @@ if page == "Lançamentos" and can_view("Lançamentos"):
             WHERE s.etapa = ?
             ORDER BY s.nome
         """, conn, params=(casa_id, etapa))
-
         nao_conc = sugest_df[sugest_df["status"] != "Concluído"]
         multiselect_opts = nao_conc["nome"].tolist()
 
@@ -982,20 +984,16 @@ if page == "Lançamentos" and can_view("Lançamentos"):
                                  """, (casa_id, sid, "Em execução", executor_multi or "", data_inicio_multi.isoformat(), now))
                     conn.execute("""INSERT INTO lancamentos (obra_id, casa_id, servico_id, responsavel, executor, status, data_inicio, observacoes, created_at)
                                     VALUES (?,?,?,?,?,?,?,?,?)""",
-
-                                 (obra_id, casa_id, sid, st.session_state["user"]["nome"], executor_multi or "", "Em execução",
+                                 (obra_id, casa_id, sid, user["nome"], executor_multi or "", "Em execução",
                                   data_inicio_multi.isoformat(), obs_multi, now))
                 conn.commit()
                 st.success(f"Iniciado(s): {len(mult_sel)} serviço(s).")
-                log_event(conn, st.session_state["user"]["nome"], "iniciar_servicos_multiplos", obra_id=obra_id, casa_id=casa_id, detalhes={"servicos": mult_sel, "executor": executor_multi, "data_inicio": data_inicio_multi.isoformat(), "obs": obs_multi})
+                log_event(conn, user["nome"], "iniciar_servicos_multiplos", obra_id=obra_id, casa_id=casa_id, detalhes={"servicos": mult_sel, "executor": executor_multi, "data_inicio": data_inicio_multi.isoformat(), "obs": obs_multi})
                 st.rerun()
 
         st.divider()
-
-        
-# === MODO 2: FINALIZAÇÃO DE SERVIÇO ===
+        # === FINALIZAR ===
         st.subheader("Finalização de Serviço (opcional)")
-        # Apenas serviços em execução
         serv_exec_df = pd.read_sql_query("SELECT s.id, s.nome FROM servicos s JOIN estado_servicos es ON es.servico_id=s.id AND es.casa_id=? WHERE s.etapa=? AND es.status='Em execução' ORDER BY s.nome", conn, params=(casa_id, etapa))
         if serv_exec_df.empty:
             st.info("Não há serviços em execução para finalizar nesta casa/etapa.")
@@ -1004,7 +1002,6 @@ if page == "Lançamentos" and can_view("Lançamentos"):
             servico_id = int(serv_exec_df[serv_exec_df["nome"] == servico_nome]["id"].iloc[0])
             data_fim = st.date_input("Data de conclusão", value=date.today())
             obs = st.text_area("Observações (opcional)")
-
             if st.button("✅ Finalizar serviço selecionado"):
                 if not can_edit("editar_lancamentos"):
                     st.error("Sem permissão para editar lançamentos.")
@@ -1014,13 +1011,13 @@ if page == "Lançamentos" and can_view("Lançamentos"):
                                  (data_fim.isoformat(), now, casa_id, servico_id))
                     conn.execute("""INSERT INTO lancamentos (obra_id, casa_id, servico_id, responsavel, executor, status, data_conclusao, observacoes, created_at)
                                     VALUES (?,?,?,?,?,?,?,?,?)""",
-                                 (obra_id, casa_id, servico_id, st.session_state["user"]["nome"], "", "Concluído", data_fim.isoformat(), obs, now))
+                                 (obra_id, casa_id, servico_id, user["nome"], "", "Concluído", data_fim.isoformat(), obs, now))
                     conn.commit()
                     st.success(f"Serviço '{servico_nome}' finalizado.")
-                    log_event(conn, st.session_state["user"]["nome"], "finalizar_servico", obra_id=obra_id, casa_id=casa_id, servico_id=servico_id, detalhes={"servico": servico_nome, "data_fim": data_fim.isoformat(), "obs": obs})
+                    log_event(conn, user["nome"], "finalizar_servico", obra_id=obra_id, casa_id=casa_id, servico_id=servico_id, detalhes={"servico": servico_nome, "data_fim": data_fim.isoformat(), "obs": obs})
                     st.rerun()
-        st.divider()
 
+        st.divider()
         st.subheader("Estado atual dos serviços desta casa/etapa")
         estado_df = pd.read_sql_query("""
             SELECT s.nome as servico, es.status, es.executor, es.data_inicio, es.data_fim, es.updated_at
@@ -1031,13 +1028,10 @@ if page == "Lançamentos" and can_view("Lançamentos"):
         """, conn, params=(casa_id, etapa))
         st.dataframe(estado_df, use_container_width=True)
 
-
-
 # -------- Dashboard --------
 if page == "Dashboard":
     st.header("Dashboard (visão por CASA)")
 
-    # Filtros principais
     obras_all = pd.read_sql_query("SELECT nome FROM obras ORDER BY nome", conn)
     if obras_all.empty:
         st.info("Nenhuma obra cadastrada.")
@@ -1050,7 +1044,6 @@ if page == "Dashboard":
     etapa_opts = ["Todas"] + (etapas_df["nome"].tolist() if not etapas_df.empty else [])
     etapa_sel = col_f2.selectbox("Etapa", etapa_opts, index=0)
 
-    # Universo: casas da obra
     casas = pd.read_sql_query("""
         SELECT c.id as casa_id, c.lote, c.ativa
         FROM casas c
@@ -1061,27 +1054,14 @@ if page == "Dashboard":
     if casas.empty:
         st.info("Não há casas para esta obra.")
         st.stop()
-
     casa_ids = casas["casa_id"].tolist()
 
-
-    # Ativação por frente: calcular flag de ativação por casa considerando a etapa selecionada
     if etapa_sel == "Todas":
-        ativa_df = pd.read_sql_query(
-            "SELECT casa_id, MAX(COALESCE(ativa,0)) AS ativa_etapa FROM casa_ativacoes GROUP BY casa_id",
-            conn
-        )
+        ativa_df = pd.read_sql_query("SELECT casa_id, MAX(COALESCE(ativa,0)) AS ativa_etapa FROM casa_ativacoes GROUP BY casa_id", conn)
     else:
-        ativa_df = pd.read_sql_query(
-            "SELECT casa_id, MAX(COALESCE(ativa,0)) AS ativa_etapa FROM casa_ativacoes WHERE etapa = ? GROUP BY casa_id",
-            conn, params=(etapa_sel,)
-        )
+        ativa_df = pd.read_sql_query("SELECT casa_id, MAX(COALESCE(ativa,0)) AS ativa_etapa FROM casa_ativacoes WHERE etapa = ? GROUP BY casa_id", conn, params=(etapa_sel,))
     casas = casas.merge(ativa_df, on="casa_id", how="left")
     casas["ativa_etapa"] = casas["ativa_etapa"].fillna(0).astype(int)
-    # Estado atual
-    if len(casa_ids) == 0:
-        st.info("Nenhuma casa selecionada.")
-        st.stop()
 
     placeholders = ",".join(["?"] * len(casa_ids))
     est_sql = f"""
@@ -1095,32 +1075,25 @@ if page == "Dashboard":
     if etapa_sel != "Todas":
         estado = estado[estado["etapa"] == etapa_sel]
 
-    # Em execução por casa
     exec_por_casa = estado[estado["status"] == "Em execução"].groupby("casa_id")["servico_id"].nunique().rename("em_exec")
-    # Totais por casa (sem previstos): usa todos os serviços da etapa selecionada
     serv_all = pd.read_sql_query("SELECT id as servico_id, etapa FROM servicos WHERE (obra_id=(SELECT id FROM obras WHERE nome=?) OR obra_id IS NULL)", conn, params=(obra_sel,))
     if etapa_sel != "Todas":
         serv_all = serv_all[serv_all["etapa"] == etapa_sel]
     total_count = int(len(serv_all))
     total_por_casa = pd.Series({cid: total_count for cid in casa_ids}, name="total_serv")
 
-    # Concluídos por casa a partir de estado_servicos
     if not estado.empty:
-        concl_por_casa = estado[estado["status"] == "Concluído"].groupby("casa_id")["servico_id"].nunique()
-        concl_por_casa = concl_por_casa.rename("concluidos")
+        concl_por_casa = estado[estado["status"] == "Concluído"].groupby("casa_id")["servico_id"].nunique().rename("concluidos")
     else:
-        import pandas as _pd
-        concl_por_casa = _pd.Series({cid: 0 for cid in casa_ids}, name="concluidos")
+        concl_por_casa = pd.Series({cid: 0 for cid in casa_ids}, name="concluidos")
 
-    # Resumo base
-    resumo = casas.merge(total_por_casa, left_on="casa_id", right_index=True, how="left")
-    resumo = resumo.merge(concl_por_casa, left_on="casa_id", right_index=True, how="left")
-    resumo = resumo.merge(exec_por_casa, left_on="casa_id", right_index=True, how="left")
+    resumo = casas.merge(total_por_casa, left_on="casa_id", right_index=True, how="left") \
+                  .merge(concl_por_casa, left_on="casa_id", right_index=True, how="left") \
+                  .merge(exec_por_casa, left_on="casa_id", right_index=True, how="left")
     resumo["total_serv"] = resumo["total_serv"].fillna(0).astype(int)
     resumo["concluidos"] = resumo["concluidos"].fillna(0).astype(int)
-
     resumo["em_exec"] = resumo["em_exec"].fillna(0).astype(int)
-    # Classificação por casa
+
     def classifica(row):
         if int(row.get("ativa_etapa", row.get("ativa", 0))) == 0:
             return "Não iniciado"
@@ -1130,11 +1103,9 @@ if page == "Dashboard":
 
     resumo["status_casa"] = resumo.apply(classifica, axis=1)
     den = pd.to_numeric(resumo["total_serv"], errors="coerce").astype("Float64")
-    num = pd.to_numeric(resumo["concluidos"], errors="coerce").astype("Float64")
     resumo["progresso_%"] = ((resumo["concluidos"] + resumo["em_exec"]).where(den>0, 0) / den.where(den>0, 1)) * 100
     resumo["progresso_%"] = resumo["progresso_%"].fillna(0).round(1)
 
-    # KPIs
     c1, c2, c3 = st.columns(3)
     c1.metric("Casas — Não iniciado", int((resumo["status_casa"] == "Não iniciado").sum()))
     c2.metric("Casas — Em execução", int((resumo["status_casa"] == "Em execução").sum()))
@@ -1142,7 +1113,6 @@ if page == "Dashboard":
 
     st.divider()
 
-    # Último responsável por casa (via lançamentos)
     lan_sql = f"""
         SELECT l.casa_id, l.responsavel, l.created_at, s.etapa
         FROM lancamentos l
@@ -1165,7 +1135,6 @@ if page == "Dashboard":
         return ""
     resumo["responsavel_display"] = resumo.apply(escolhe_resp, axis=1)
 
-    # Lista de casas em execução (com fallback por lançamentos se necessário)
     em_exec = resumo[resumo["status_casa"] == "Em execução"].copy()
     if em_exec.empty and not lan.empty:
         casas_lan = lan[["casa_id"]].drop_duplicates()
@@ -1175,7 +1144,6 @@ if page == "Dashboard":
     if em_exec.empty:
         st.info("Nenhuma casa em execução para os filtros selecionados.")
     else:
-        # Garantir colunas necessárias
         if "lote" not in em_exec.columns:
             em_exec = em_exec.merge(casas[["casa_id","lote"]], on="casa_id", how="left")
         for _c in ["responsavel_display","progresso_%","concluidos","total_serv"]:
@@ -1185,19 +1153,16 @@ if page == "Dashboard":
         em_exec_view = em_exec[["lote","responsavel_display","progresso_%","concluidos","total_serv"]].rename(columns={"responsavel_display": "Responsável"}).sort_values(["progresso_%","lote"], ascending=[False, True])
         st.dataframe(em_exec_view, use_container_width=True)
 
-        # Drilldown por casa
         lotes_exec = em_exec["lote"].dropna().tolist()
         if lotes_exec:
             lote_sel = st.selectbox("Selecionar casa (lote) para ver serviços", lotes_exec)
             casa_id_sel = int(em_exec.loc[em_exec["lote"] == lote_sel, "casa_id"].iloc[0])
 
-            # Base de serviços da etapa
             serv_base = pd.read_sql_query("SELECT id as servico_id, nome as servico, etapa FROM servicos", conn)
             if etapa_sel != "Todas":
                 serv_base = serv_base[serv_base["etapa"] == etapa_sel]
 
             det_est = estado[estado["casa_id"] == casa_id_sel].copy()
-            # Garantir colunas
             for _col in ["executor","data_inicio","data_fim","status"]:
                 if _col not in det_est.columns:
                     det_est[_col] = pd.NA
@@ -1213,12 +1178,59 @@ if page == "Dashboard":
                 lan_serv["created_at"] = pd.to_datetime(lan_serv["created_at"])
                 ini = lan_serv[lan_serv["status"] == "Em execução"].sort_values(["servico_id","created_at"]).groupby("servico_id").head(1)[["servico_id","responsavel"]].rename(columns={"responsavel":"responsavel_inicio"})
                 fim = lan_serv[lan_serv["status"] == "Concluído"].sort_values(["servico_id","created_at"]).groupby("servico_id").tail(1)[["servico_id","responsavel"]].rename(columns={"responsavel":"responsavel_fim"})
-                det = det.merge(ini, on="servico_id", how="left")
-                det = det.merge(fim, on="servico_id", how="left")
+                det = det.merge(ini, on="servico_id", how="left").merge(fim, on="servico_id", how="left")
             else:
                 det["responsavel_inicio"] = pd.NA
                 det["responsavel_fim"] = pd.NA
 
-            det_view = det[["etapa","servico","status","executor","responsavel_inicio","responsavel_fim","data_inicio","data_fim"]].rename(columns={"responsavel_inicio":"Resp. início","responsavel_fim":"Resp. finalização"}).sort_values(["etapa","servico"])
+            det_view = det[["etapa","servico","status","executor","responsavel_inicio","responsavel_fim","data_inicio","data_fim"]] \
+                        .rename(columns={"responsavel_inicio":"Resp. início","responsavel_fim":"Resp. finalização"}) \
+                        .sort_values(["etapa","servico"])
             st.write(f"**Casa {lote_sel}** — Serviços (por status)")
             st.dataframe(det_view, use_container_width=True)
+
+# -------- Observações --------
+if page == "Observações":
+    st.header("Observações por Casa")
+    st.caption("Aqui você vê todas as observações lançadas (início e finalização) por Obra → Casa, com filtros e exportação.")
+
+    obras = pd.read_sql_query("SELECT id, nome FROM obras ORDER BY nome", conn)
+    if obras.empty:
+        st.info("Não há obras cadastradas.")
+        st.stop()
+    obra_sel = st.selectbox("Obra", obras["nome"].tolist(), key="obs_ob")
+    obra_id = int(obras.loc[obras["nome"]==obra_sel, "id"].iloc[0])
+
+    casas = pd.read_sql_query("SELECT id, lote FROM casas WHERE obra_id=? ORDER BY lote", conn, params=(obra_id,))
+    if casas.empty:
+        st.info("Não há casas nesta obra.")
+        st.stop()
+    lote_sel = st.selectbox("Casa (lote)", casas["lote"].tolist(), key="obs_lote")
+    casa_id = int(casas.loc[casas["lote"]==lote_sel, "id"].iloc[0])
+
+    etapas = pd.read_sql_query("SELECT DISTINCT s.etapa FROM servicos s ORDER BY s.etapa", conn)
+    etapa_opts = ["Todas"] + etapas["etapa"].dropna().tolist()
+    etapa_sel = st.selectbox("Etapa (opcional)", etapa_opts, key="obs_et")
+
+    # Base de observações
+    sql = """
+        SELECT l.created_at as data, s.etapa, s.nome as servico, l.status,
+               COALESCE(l.executor,'') as executor, l.data_inicio, l.data_conclusao,
+               COALESCE(l.observacoes,'') as observacoes, l.responsavel
+        FROM lancamentos l
+        JOIN servicos s ON s.id = l.servico_id
+        WHERE COALESCE(l.anulado,0)=0 AND l.obra_id=? AND l.casa_id=? AND TRIM(COALESCE(l.observacoes,'')) <> ''
+        ORDER BY l.created_at DESC
+    """
+    df = pd.read_sql_query(sql, conn, params=(obra_id, casa_id))
+    if etapa_sel != "Todas":
+        df = df[df["etapa"] == etapa_sel]
+
+    st.write(f"Observações encontradas: **{len(df)}**")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if not df.empty:
+        csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("Baixar CSV das observações", data=csv_bytes, file_name=f"observacoes_{obra_sel}_{lote_sel}.csv", mime="text/csv")
+
+# -------------------- FIM --------------------
