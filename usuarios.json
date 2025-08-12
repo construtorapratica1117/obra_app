@@ -1,0 +1,113 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "nome": "Yuri Silva",
+      "role": "admin",
+      "password": "123456",
+      "ativo": true,
+      "permissoes": {
+        "ver_ativar_casa": true,
+        "ver_lancamentos": true,
+        "ver_dashboard": true,
+        "ver_servicos": true,
+        "ver_logs": true,
+        "ver_admin": true,
+        "editar_lancamentos": true,
+        "editar_servicos": true,
+        "editar_usuarios": true,
+        "corrigir_registros": true
+      }
+    },
+    {
+      "username": "luanna",
+      "nome": "Eng. Luanna",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "rick",
+      "nome": "Enc. Rick",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "joseelias",
+      "nome": "Enc. José Elias",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "pedro",
+      "nome": "Eng. Pedro",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "sebastiao",
+      "nome": "Enc. Sebastião",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "antonio",
+      "nome": "Enc. Antônio",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "wellington",
+      "nome": "Enc. Wellington",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "dinair",
+      "nome": "Enc. Dinair",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "joaopaulo",
+      "nome": "Eng. João Paulo",
+      "role": "user",
+      "password": "123456",
+      "ativo": true
+    },
+    {
+      "username": "yuri",
+      "nome": "Yuri Silva",
+      "role": "admin",
+      "ativo": true,
+      "permissoes": {
+        "ver_ativar_casa": true,
+        "ver_lancamentos": true,
+        "ver_dashboard": true,
+        "ver_servicos": true,
+        "ver_logs": true,
+        "ver_admin": true,
+        "editar_lancamentos": true,
+        "editar_servicos": true,
+        "editar_usuarios": true,
+        "corrigir_registros": true
+      },
+      "password_hash": "pbkdf2$130000$bf5bd4bd85d95e12a19a8b45c6bf541f$81c18ee07ddbb8d6683ca287f495e5359da00ca54f57a537f7f856794a208611",
+      "password": "2409"
+    },
+    {
+      "username": "cristhian",
+      "nome": "Cristhian Duarte",
+      "role": "admin",
+      "password": "2409",
+      "ativo": true
+    }
+  ]
+}
