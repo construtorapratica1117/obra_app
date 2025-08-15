@@ -1,3 +1,6 @@
+APP_VERSION = "2025-08-15_1"  # atualize a cada mudança
+st.sidebar.caption(f"Versão do app: {APP_VERSION}")
+
 import os
 import json
 from datetime import datetime, date
