@@ -293,10 +293,8 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                             sb_delete("servicos", {"id": s["id"]})
                         # Remove ativações dessa etapa
                         casas = sb_select("casas", filters={"obra_id": obra_id})
-                        casa_ids = [c["id"] for c in casas]
-                        if casa_ids:
-                            for cid in casa_ids:
-                                sb_delete("casa_ativacoes", {"casa_id": cid, "etapa": et_del_nome})
+                        for c in casas:
+                            sb_delete("casa_ativacoes", {"casa_id": c["id"], "etapa": et_del_nome})
                         # Remove a etapa
                         sb_delete("etapas", {"obra_id": obra_id, "nome": et_del_nome})
                         st.success(f"Etapa '{et_del_nome}' excluída.")
@@ -371,9 +369,6 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                             registros = []
 
                         if registros:
-                            # upsert em lote
-                            # on_conflict -> (nome, etapa, obra_id)
-                            # dividimos em pedaços p/ evitar payloads muito grandes
                             chunk = 500
                             total_ok = 0
                             for i in range(0, len(registros), chunk):
@@ -426,7 +421,7 @@ if page == "Base de Dados" and can_view("Base de Dados"):
             casas = pd.DataFrame(sb_select("casas", filters={"obra_id": obra_id}, order="lote"))
             st.dataframe(casas[["id","lote","tipologia","ativa","ativa_em","ativa_por"]] if not casas.empty else casas, use_container_width=True, hide_index=True)
 
-            # Importação em massa de casas
+            # Importação em massa de casas (corrigido para aceitar QUADRA+LOTE ou LOTE)
             st.markdown("### Importar casas por planilha (.xlsx ou .csv)")
             with st.expander("Modelo de planilha e instruções", expanded=False):
                 st.write("- **Opção A (1 coluna):** `lote` (ex.: `QD 3 LT 15`).")
@@ -445,33 +440,36 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                     dfc.columns = cols
 
                     registros = []
-                    # Preferência: se vier 'lote' usa diretamente.
-                    if "lote" in dfc.columns:
+                    # 1) Se vierem as duas colunas 'quadra' e 'lote' → monta "QD {quadra} LT {lote}"
+                    if ("quadra" in dfc.columns) and ("lote" in dfc.columns):
                         for _, r in dfc.iterrows():
-                            lote_val = str(r.get("lote", "")).strip()
-                            if not lote_val:
+                            qv = str(r.get("quadra", "")).strip()
+                            lv = str(r.get("lote", "")).strip()
+                            if not qv or not lv:
                                 continue
-                            rec = {
+                            lote_val = f"QD {qv} LT {lv}"
+                            registros.append({
                                 "obra_id": obra_id,
                                 "lote": lote_val,
                                 "cod_tipologia": str(r.get("cod_tipologia", "") or "").strip() if "cod_tipologia" in dfc.columns else None,
                                 "tipologia": str(r.get("tipologia", "") or "").strip() if "tipologia" in dfc.columns else None,
-                            }
-                            registros.append(rec)
-                    # Caso não tenha 'lote', mas tenha 'quadra' e 'lote' (numérico/str separado)
-                    elif ("quadra" in dfc.columns) and ("lote" in dfc.columns):
-                        # (este ramo só cai se 'lote' não foi detectado na normalização — mantido por compatibilidade)
-                        pass
-                    # Caso 2 colunas: quadra + lote_num (permitindo nomes alternativos)
+                            })
+                    # 2) Se vier só 'lote' já pronto
+                    elif "lote" in dfc.columns:
+                        for _, r in dfc.iterrows():
+                            lote_val = str(r.get("lote", "")).strip()
+                            if not lote_val:
+                                continue
+                            registros.append({
+                                "obra_id": obra_id,
+                                "lote": lote_val,
+                                "cod_tipologia": str(r.get("cod_tipologia", "") or "").strip() if "cod_tipologia" in dfc.columns else None,
+                                "tipologia": str(r.get("tipologia", "") or "").strip() if "tipologia" in dfc.columns else None,
+                            })
+                    # 3) Caso venham sinônimos (qd/lt, q/l)
                     else:
-                        # tentar variações
-                        q_col = None
-                        l_col = None
-                        for c in dfc.columns:
-                            if c in ["quadra", "qd", "q"]:
-                                q_col = c
-                            if c in ["lote", "lt", "l"]:
-                                l_col = c
+                        q_col = next((c for c in dfc.columns if c in ["quadra", "qd", "q"]), None)
+                        l_col = next((c for c in dfc.columns if c in ["lote", "lt", "l"]), None)
                         if q_col and l_col:
                             for _, r in dfc.iterrows():
                                 qv = str(r.get(q_col, "")).strip()
@@ -479,18 +477,16 @@ if page == "Base de Dados" and can_view("Base de Dados"):
                                 if not qv or not lv:
                                     continue
                                 lote_val = f"QD {qv} LT {lv}"
-                                rec = {
+                                registros.append({
                                     "obra_id": obra_id,
                                     "lote": lote_val,
                                     "cod_tipologia": str(r.get("cod_tipologia", "") or "").strip() if "cod_tipologia" in dfc.columns else None,
                                     "tipologia": str(r.get("tipologia", "") or "").strip() if "tipologia" in dfc.columns else None,
-                                }
-                                registros.append(rec)
+                                })
 
                     if not registros:
-                        st.error("Não foram encontrados dados válidos. Certifique-se de ter 'lote' ou 'quadra'+'lote' na planilha.")
+                        st.error("Não foram encontrados dados válidos. Use 'quadra'+'lote' ou 'lote'.")
                     else:
-                        # upsert em lote por (obra_id, lote)
                         chunk = 500
                         total_ok = 0
                         for i in range(0, len(registros), chunk):
@@ -673,7 +669,7 @@ if page == "Correções" and can_view("Correções") and can_edit("corrigir_regi
             else:
                 lotes = sorted(casas_lanc["lote"].unique().tolist())
                 lote_sel = st.selectbox("Casa (lote)", lotes)
-                casa_id = int(casas[cases := (casas["lote"]==lote_sel)]["id"].iloc[0])
+                casa_id = int(casas.loc[casas["lote"]==lote_sel, "id"].iloc[0])
 
                 servs = pd.DataFrame(sb_select("servicos", filters={"obra_id": obra_id}))
                 if servs.empty:
